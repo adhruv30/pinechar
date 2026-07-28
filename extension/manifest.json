@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "AI Gate",
+  "version": "0.1.0",
+  "description": "Intercepts navigations to distracting sites and routes them through a gate page.",
+  "permissions": ["declarativeNetRequest", "storage", "alarms"],
+  "host_permissions": ["*://*.instagram.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["gate.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
