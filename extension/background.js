@@ -39,6 +39,27 @@ async function removeRule(key) {
   });
 }
 
+// Re-adding a rule only affects future navigations, so tabs already sitting on
+// the site stay alive. This kicks them to the gate.
+//
+// The url filter is doing double duty: it selects the tabs, and it keeps this
+// call inside our host_permissions, which is why no "tabs" permission is needed.
+// A pattern of `*.instagram.com` covers the bare domain as well as subdomains.
+async function evictTabs(key) {
+  const gateUrl = chrome.runtime.getURL(
+    `gate.html?site=${key}&expired=true`,
+  );
+  const tabs = await chrome.tabs.query({
+    url: `*://*.${SITES[key].domain}/*`,
+  });
+
+  // allSettled: a tab can close between the query and the update, and one
+  // failure shouldn't strand the rest on the site.
+  await Promise.allSettled(
+    tabs.map((tab) => chrome.tabs.update(tab.id, { url: gateUrl })),
+  );
+}
+
 async function getGrants() {
   const stored = await chrome.storage.local.get(GRANTS_KEY);
   return stored[GRANTS_KEY] ?? {};
@@ -70,10 +91,15 @@ async function unlock(domain, minutes) {
   return { expiresAt, domain: site.domain };
 }
 
+// Every path back to the blocked state goes through here — the expiry alarm and
+// reconcile() both call it — so eviction lands in both cases from one place.
 async function relock(key) {
+  // Rule first: if eviction ran first, a tab could navigate back in through the
+  // window before the rule exists.
   await addRule(key);
   await clearGrant(key);
   await chrome.alarms.clear(ALARM_PREFIX + key);
+  await evictTabs(key);
 }
 
 // Runs on every worker startup. Storage is the source of truth; the rule table
@@ -91,7 +117,9 @@ async function reconcile() {
       await chrome.alarms.create(ALARM_PREFIX + key, { when: expiresAt });
     } else {
       // Expired or never granted — including the case where the alarm never
-      // fired because the browser was closed through the expiry.
+      // fired because the browser was closed through the expiry. relock()
+      // evicts, which catches session-restored tabs that came back up on the
+      // site after their grant had already lapsed.
       await relock(key);
     }
   }

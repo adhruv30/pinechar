@@ -1,5 +1,11 @@
-const site = new URLSearchParams(location.search).get("site") ?? "instagram";
+const params = new URLSearchParams(location.search);
+const site = params.get("site") ?? "instagram";
 const button = document.getElementById("unlock");
+
+// Set when we pulled this tab off the site rather than blocking a fresh visit.
+if (params.get("expired") === "true") {
+  document.querySelector("h1").textContent = "Time's up";
+}
 
 button.addEventListener("click", async () => {
   button.disabled = true;
