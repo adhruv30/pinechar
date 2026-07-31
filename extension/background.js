@@ -105,7 +105,7 @@ async function relock(key) {
   try {
     await evictTabs(key);
   } catch (err) {
-    console.error("[ai-gate] eviction failed for", key, err);
+    console.error("[pinechar] eviction failed for", key, err);
   }
 }
 
@@ -134,23 +134,23 @@ async function reconcile() {
 
 // Nothing below awaits these, so without a catch a rejection would surface as a
 // bare unhandled-rejection with no hint of which path produced it.
-const report = (what) => (err) => console.error(`[ai-gate] ${what} failed`, err);
+const report = (what) => (err) => console.error(`[pinechar] ${what} failed`, err);
 
 // Listeners are registered synchronously at the top level so Chrome knows which
 // events should wake a stopped worker.
 chrome.runtime.onInstalled.addListener(() => {
-  console.log("[ai-gate] onInstalled");
+  console.log("[pinechar] onInstalled");
   reconcile().catch(report("reconcile/onInstalled"));
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  console.log("[ai-gate] onStartup");
+  console.log("[pinechar] onStartup");
   reconcile().catch(report("reconcile/onStartup"));
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (!alarm.name.startsWith(ALARM_PREFIX)) return;
-  console.log("[ai-gate] alarm fired:", alarm.name);
+  console.log("[pinechar] alarm fired:", alarm.name);
   relock(alarm.name.slice(ALARM_PREFIX.length)).catch(report("relock/alarm"));
 });
 
@@ -164,5 +164,5 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 // Also runs on a plain wake-up, which is neither onInstalled nor onStartup.
 // If you don't see this line in the worker console, the script never evaluated.
-console.log("[ai-gate] worker evaluated, listeners registered");
+console.log("[pinechar] worker evaluated, listeners registered");
 reconcile().catch(report("reconcile/startup"));

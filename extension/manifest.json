@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "AI Gate",
+  "name": "PineChar",
   "version": "0.1.0",
   "description": "Intercepts navigations to distracting sites and routes them through a gate page.",
   "permissions": ["declarativeNetRequest", "storage", "alarms"],
@@ -9,7 +9,7 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Weekly goals",
+    "default_title": "PineChar — Weekly goals",
     "default_popup": "goals.html"
   },
   "web_accessible_resources": [

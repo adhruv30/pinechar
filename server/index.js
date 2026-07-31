@@ -11,7 +11,7 @@ const MODEL = "claude-sonnet-4-6";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 if (!ANTHROPIC_API_KEY) {
   console.warn(
-    "[ai-gate] ANTHROPIC_API_KEY is not set — /negotiate will fail closed on every request.",
+    "[pinechar] ANTHROPIC_API_KEY is not set — /negotiate will fail closed on every request.",
   );
 }
 
@@ -27,7 +27,7 @@ const allowedOrigin = EXTENSION_ID ? `chrome-extension://${EXTENSION_ID}` : null
 
 if (!allowedOrigin) {
   console.warn(
-    "[ai-gate] EXTENSION_ID not set — allowing any chrome-extension:// origin (dev only).",
+    "[pinechar] EXTENSION_ID not set — allowing any chrome-extension:// origin (dev only).",
   );
 }
 
@@ -179,7 +179,7 @@ function validateDecision(parsed) {
 // Every failure path lands here, and it is always a denial — a gate that opens
 // when the judge is unreachable is worse than no gate.
 function fallbackDecision(reason) {
-  console.error("[ai-gate] falling back to denial:", reason);
+  console.error("[pinechar] falling back to denial:", reason);
   return {
     score: 1,
     minutes: 0,
@@ -239,7 +239,7 @@ app.post("/negotiate", async (req, res) => {
   const messages = normalizeMessages(body.messages);
 
   // Log shapes rather than contents — goals and calendar entries are personal.
-  console.log("[ai-gate] POST /negotiate", {
+  console.log("[pinechar] POST /negotiate", {
     messages: messages?.length ?? 0,
     goalsChars: body.goalsText?.length ?? 0,
     todayEvents: Array.isArray(body.todayEvents) ? body.todayEvents.length : 0,
@@ -276,11 +276,11 @@ app.post("/negotiate", async (req, res) => {
     decision = validateDecision(extractJson(text));
 
     if (!decision) {
-      console.error("[ai-gate] unparseable model output:", text.slice(0, 500));
+      console.error("[pinechar] unparseable model output:", text.slice(0, 500));
       return res.json(fallbackDecision("model returned malformed JSON"));
     }
   } catch (err) {
-    console.error("[ai-gate] Anthropic call failed:", err);
+    console.error("[pinechar] Anthropic call failed:", err);
     return res.json(fallbackDecision(describeError(err)));
   }
 
@@ -298,5 +298,5 @@ app.post("/negotiate", async (req, res) => {
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 app.listen(PORT, () => {
-  console.log(`[ai-gate] listening on http://localhost:${PORT} (model: ${MODEL})`);
+  console.log(`[pinechar] listening on http://localhost:${PORT} (model: ${MODEL})`);
 });
