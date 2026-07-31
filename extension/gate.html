@@ -3,11 +3,28 @@
   <head>
     <meta charset="utf-8" />
     <title>Blocked</title>
+    <style>
+      body {
+        font: 14px system-ui, sans-serif;
+        margin: 40px auto;
+        max-width: 480px;
+      }
+      /* pre-wrap so prose typed with line breaks keeps them. */
+      #goals {
+        white-space: pre-wrap;
+        margin: 0 0 20px;
+      }
+      #goals.empty {
+        color: #666;
+      }
+    </style>
   </head>
   <body>
     <h1>Blocked</h1>
+    <p id="goals"></p>
     <!-- Temporary escape hatch for testing the unlock path. -->
     <button id="unlock">2 minute unlock</button>
+    <p><a href="goals.html">Edit goals</a></p>
     <script src="gate.js"></script>
   </body>
 </html>

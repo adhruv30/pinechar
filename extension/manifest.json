@@ -8,6 +8,10 @@
   "background": {
     "service_worker": "background.js"
   },
+  "action": {
+    "default_title": "Weekly goals",
+    "default_popup": "goals.html"
+  },
   "web_accessible_resources": [
     {
       "resources": ["gate.html"],

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Weekly goals</title>
+    <style>
+      /* Popups size to their content, so the width here is what sets the
+         popup's width. Min/max keeps it sane when opened as a full tab too. */
+      body {
+        font: 14px system-ui, sans-serif;
+        margin: 12px;
+        min-width: 320px;
+        max-width: 480px;
+      }
+      h1 {
+        font-size: 15px;
+        margin: 0 0 8px;
+      }
+      textarea {
+        width: 100%;
+        box-sizing: border-box;
+        min-height: 140px;
+        font: inherit;
+      }
+      #status {
+        color: #666;
+        margin: 8px 0 0;
+        min-height: 1em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Weekly goals</h1>
+    <textarea
+      id="goals"
+      placeholder="What are you trying to get done this week?"
+    ></textarea>
+    <button id="save">Save goals</button>
+    <p id="status"></p>
+    <script src="goals.js"></script>
+  </body>
+</html>

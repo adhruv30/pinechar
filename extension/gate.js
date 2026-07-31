@@ -7,6 +7,14 @@ if (params.get("expired") === "true") {
   document.querySelector("h1").textContent = "Time's up";
 }
 
+// Remind me what I said I'd be doing instead.
+chrome.storage.local.get("goalsText").then(({ goalsText }) => {
+  const el = document.getElementById("goals");
+  const text = goalsText?.trim();
+  el.textContent = text || "No goals set yet — click the toolbar icon to add some.";
+  el.classList.toggle("empty", !text);
+});
+
 button.addEventListener("click", async () => {
   button.disabled = true;
   const res = await chrome.runtime.sendMessage({
