@@ -96,6 +96,16 @@ function sanitizePersona(raw) {
   return cleaned || DEFAULT_PERSONA;
 }
 
+// Rule 12 lets the judge ask before scoring, which means a negotiation can now
+// fail to terminate. One question is the budget; past that the answer is as
+// good as it will get.
+const MAX_QUESTIONS = 1;
+
+function questionsAsked(body) {
+  const n = Number(body?.questionsAsked);
+  return Number.isInteger(n) && n >= 0 ? n : 0;
+}
+
 function asJson(value, fallback) {
   return value === undefined || value === null
     ? fallback
@@ -106,6 +116,8 @@ function buildContextBlock(body) {
   const { goalsText, ledger, today, todayEvents, settings, site } = body;
   const goals =
     typeof goalsText === "string" && goalsText.trim() ? goalsText : "(none set)";
+
+  const asked = questionsAsked(body);
 
   return [
     "=== REQUEST CONTEXT ===",
@@ -127,6 +139,12 @@ function buildContextBlock(body) {
     "",
     "SETTINGS:",
     asJson(settings, "{}"),
+    "",
+    // Counted by the client, which is the only party that knows how this
+    // negotiation has gone — the server sees each turn cold.
+    `CLARIFYING QUESTIONS ALREADY ASKED: ${asked}${
+      asked >= MAX_QUESTIONS ? " — limit reached; judge now, do not ask another." : ""
+    }`,
   ].join("\n");
 }
 
@@ -163,10 +181,20 @@ function extractJson(text) {
 function validateDecision(parsed) {
   if (!parsed || typeof parsed !== "object") return null;
 
+  // A question is the one shape that carries no score: rule 12 has the judge
+  // still gathering facts, so there is nothing to pay out or log yet.
+  if (parsed.decision === "question") {
+    const message = typeof parsed.message === "string" ? parsed.message : "";
+    return message.trim() ? { kind: "question", message } : null;
+  }
+
+  // No `decision` at all still validates as a judgment — the score is what
+  // makes it one, and a missing field shouldn't fail an otherwise good answer.
   const score = Number(parsed.score);
   if (!Number.isInteger(score) || score < 1 || score > 10) return null;
 
   return {
+    kind: "judgment",
     score,
     reasoning: typeof parsed.reasoning === "string" ? parsed.reasoning : "",
     claims: Array.isArray(parsed.claims)
@@ -181,9 +209,11 @@ function validateDecision(parsed) {
 function fallbackDecision(reason) {
   console.error("[pinechar] falling back to denial:", reason);
   return {
+    decision: "denied",
     score: 1,
     minutes: 0,
     code: null,
+    claims: [],
     reasoning: `Fallback denial: ${reason}`,
     message:
       "I couldn't reach a decision just now, so the gate stays shut. Try again in a moment.",
@@ -284,13 +314,30 @@ app.post("/negotiate", async (req, res) => {
     return res.json(fallbackDecision(describeError(err)));
   }
 
+  // No score, no payout, no ledger entry — the conversation just continues.
+  if (decision.kind === "question") {
+    if (questionsAsked(body) >= MAX_QUESTIONS) {
+      // The instruction to stop asking was explicit and in-context. Rather than
+      // let the gate loop forever, it closes — same fail-closed rule as every
+      // other path where the judge doesn't produce a usable decision.
+      return res.json(fallbackDecision("judge exceeded its clarifying-question budget"));
+    }
+    return res.json({ decision: "question", message: decision.message });
+  }
+
   const minutes = minutesFor(decision.score, strictness);
 
   res.json({
+    // Derived here, not taken from the model: the score bands and the
+    // strictness table decide the outcome, and the judge never sees minutes.
+    decision: minutes > 0 ? "granted" : "denied",
     score: decision.score,
     minutes,
     code: minutes > 0 ? generateCode() : null,
     reasoning: decision.reasoning,
+    // The extension writes these into the ledger, which is what lets rule 5
+    // catch a claim being spent twice — without them the week has no memory.
+    claims: decision.claims,
     message: decision.message,
   });
 });

@@ -4,27 +4,240 @@
     <meta charset="utf-8" />
     <title>PineChar — Blocked</title>
     <style>
+      /* The page is a column: header, scrolling transcript, composer pinned to
+         the bottom. Only #log scrolls, so the input never walks off-screen. */
       body {
-        font: 14px system-ui, sans-serif;
-        margin: 40px auto;
-        max-width: 480px;
+        font: 14px/1.5 system-ui, sans-serif;
+        margin: 0 auto;
+        padding: 20px 16px;
+        max-width: 560px;
+        height: 100vh;
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0;
+      }
+      header {
+        flex: 0 0 auto;
       }
       /* pre-wrap so prose typed with line breaks keeps them. */
       #goals {
         white-space: pre-wrap;
-        margin: 0 0 20px;
+        color: #444;
+        font-size: 13px;
+        margin: 6px 0 0;
       }
       #goals.empty {
+        color: #888;
+      }
+
+      #log {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 4px 2px;
+      }
+
+      /* Sender is encoded by side and colour; the transcript has no avatars or
+         name labels, so alignment is the only thing telling them apart. */
+      .bubble {
+        max-width: 78%;
+        padding: 8px 12px;
+        border-radius: 14px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .bubble.gatekeeper {
+        align-self: flex-start;
+        background: #eceef1;
+        border-bottom-left-radius: 4px;
+      }
+      .bubble.user {
+        align-self: flex-end;
+        background: #2f6df6;
+        color: #fff;
+        border-bottom-right-radius: 4px;
+      }
+      /* Offline / error notices read as the gatekeeper refusing, because that
+         is what they are — a closed gate — but they shouldn't be mistaken for
+         something the judge actually said. */
+      .bubble.offline {
+        background: #fdecec;
+        color: #7a1c1c;
+      }
+      .bubble.pending {
+        color: #666;
+        font-style: italic;
+      }
+
+      /* #log and #composer set display, which would otherwise win over the
+         hidden attribute's default styling and leave them on screen. */
+      [hidden] {
+        display: none !important;
+      }
+
+      #grant,
+      #session {
+        flex: 0 0 auto;
+        border: 1px solid #cfe3d0;
+        background: #f2f9f3;
+        border-radius: 10px;
+        padding: 12px 14px;
+      }
+      .grant-line {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        margin-bottom: 6px;
+      }
+      .grant-label {
+        color: #46614a;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        min-width: 62px;
+      }
+      #grantMinutes {
+        font-size: 22px;
+        font-weight: 600;
+      }
+      #grantCode {
+        font: 600 18px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        letter-spacing: 0.08em;
+        user-select: all;
+      }
+      #grantError {
+        color: #7a1c1c;
+        margin: 8px 0 0;
+      }
+      #go {
+        margin-top: 8px;
+      }
+
+      /* The ritual: the code has to be typed back before the gate opens. */
+      .redeem {
+        margin: 10px 0 0;
+      }
+      .redeem-hint {
+        color: #46614a;
+        font-size: 12px;
+        margin: 0 0 4px;
+      }
+      #codeInput {
+        font: 600 16px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        padding: 7px 10px;
+        border: 1px solid #b6cdb8;
+        border-radius: 8px;
+        width: 11ch;
+      }
+      #codeInput:disabled {
+        background: #e7efe8;
+        color: #46614a;
+      }
+
+      #sessionTime {
+        font-size: 16px;
+        font-weight: 600;
+        margin: 0 0 8px;
+      }
+
+      #composer {
+        flex: 0 0 auto;
+        display: flex;
+        gap: 8px;
+        align-items: flex-end;
+      }
+      #input {
+        flex: 1 1 auto;
+        font: inherit;
+        padding: 8px 10px;
+        border: 1px solid #c8ccd2;
+        border-radius: 8px;
+        resize: none;
+      }
+      #composer[hidden] {
+        display: none;
+      }
+      button {
+        font: inherit;
+        padding: 8px 14px;
+        border-radius: 8px;
+        border: 1px solid #c8ccd2;
+        background: #fff;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      .foot {
+        flex: 0 0 auto;
+        margin: 0;
+        font-size: 12px;
+      }
+      .foot a {
         color: #666;
       }
     </style>
   </head>
   <body>
-    <h1>Blocked</h1>
-    <p id="goals"></p>
-    <!-- Temporary escape hatch for testing the unlock path. -->
-    <button id="unlock">2 minute unlock</button>
-    <p><a href="goals.html">Edit goals</a></p>
+    <header>
+      <h1>Blocked</h1>
+      <p id="goals"></p>
+    </header>
+
+    <main id="log" aria-live="polite"></main>
+
+    <section id="grant" hidden>
+      <div class="grant-line">
+        <span class="grant-label">Granted</span>
+        <span id="grantMinutes"></span>
+      </div>
+      <div class="grant-line">
+        <span class="grant-label">Code</span>
+        <span id="grantCode"></span>
+      </div>
+      <div class="redeem">
+        <p class="redeem-hint">Type the code to open the gate.</p>
+        <input
+          id="codeInput"
+          type="text"
+          autocomplete="off"
+          autocapitalize="characters"
+          spellcheck="false"
+          aria-label="Type the unlock code"
+        />
+      </div>
+      <button id="go" disabled></button>
+      <p id="grantError" hidden></p>
+    </section>
+
+    <section id="session" hidden>
+      <p id="sessionTime"></p>
+      <button id="sessionGo"></button>
+    </section>
+
+    <form id="composer">
+      <textarea
+        id="input"
+        rows="2"
+        placeholder="Make your case…"
+        autofocus
+      ></textarea>
+      <button id="send" type="submit">Send</button>
+    </form>
+
+    <p class="foot"><a href="goals.html">Edit goals</a></p>
+
     <script src="gate.js"></script>
   </body>
 </html>

@@ -155,11 +155,22 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg?.type !== "unlock") return;
-  unlock(msg.site, msg.minutes)
-    .then((result) => sendResponse({ ok: true, ...result }))
-    .catch((err) => sendResponse({ ok: false, error: String(err) }));
-  return true; // keep the channel open for the async sendResponse
+  if (msg?.type === "unlock") {
+    unlock(msg.site, msg.minutes)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true; // keep the channel open for the async sendResponse
+  }
+
+  // The gate page needs the domain to offer a link during an active session,
+  // which happens without an unlock. SITES stays the one place it's written
+  // down rather than being duplicated into the page.
+  if (msg?.type === "siteInfo") {
+    const site = SITES[msg.site];
+    sendResponse(
+      site ? { ok: true, domain: site.domain } : { ok: false, error: `unknown site: ${msg.site}` },
+    );
+  }
 });
 
 // Also runs on a plain wake-up, which is neither onInstalled nor onStartup.
