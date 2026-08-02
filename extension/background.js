@@ -7,6 +7,7 @@ const SITES = {
 
 const GRANTS_KEY = "grants";
 const ALARM_PREFIX = "relock:";
+const LEDGER_KEY = "ledger"; // written by gate.js; only read here for the count
 
 function blockRule(key) {
   const site = SITES[key];
@@ -132,6 +133,36 @@ async function reconcile() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Dev reset
+// ---------------------------------------------------------------------------
+
+// What a history wipe must not touch: the things the user typed, and the live
+// grant. Everything else in storage is negotiation history.
+//
+// A preserve-list rather than a delete-list on purpose — claims and today's
+// events aren't their own keys, they live inside ledger entries, and whatever
+// history key gets added next should be cleared by this without anyone
+// remembering to come back here.
+const PRESERVED_KEYS = [GRANTS_KEY, "goalsText", "savedAt", "settings"];
+
+// Deliberately does not touch rules, alarms, or grants: clearing history during
+// an active session leaves that session running.
+async function resetHistory() {
+  const all = await chrome.storage.local.get(null);
+  const cleared = Object.keys(all).filter((key) => !PRESERVED_KEYS.includes(key));
+  const events = Array.isArray(all[LEDGER_KEY]) ? all[LEDGER_KEY].length : 0;
+
+  await chrome.storage.local.remove(cleared);
+  console.log("[pinechar] history reset:", { cleared, events });
+  return { ok: true, cleared, events };
+}
+
+// runtime.sendMessage skips the sender's own listener, so the message below is
+// for the popup and the gate page. From the worker console the one-liner is the
+// function itself: `await resetHistory()`.
+self.resetHistory = resetHistory;
+
 // Nothing below awaits these, so without a catch a rejection would surface as a
 // bare unhandled-rejection with no hint of which path produced it.
 const report = (what) => (err) => console.error(`[pinechar] ${what} failed`, err);
@@ -165,6 +196,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   // The gate page needs the domain to offer a link during an active session,
   // which happens without an unlock. SITES stays the one place it's written
   // down rather than being duplicated into the page.
+  if (msg?.type === "reset_history") {
+    resetHistory()
+      .then(sendResponse)
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+
   if (msg?.type === "siteInfo") {
     const site = SITES[msg.site];
     sendResponse(
