@@ -160,22 +160,49 @@ function buildSystemPrompt(body) {
 // Response parsing
 // ---------------------------------------------------------------------------
 
+// Three readings of the same text, cheapest and most faithful first. Each later
+// one damages the input a little more to make it parseable, so trying them in
+// this order means a well-formed response is never mangled by a rescue meant
+// for a malformed one.
+//
+// Order matters most for the brace step: slicing between the first { and the
+// last } silently discards a top-level array, and any trailing text a model
+// appends after the object. Both parse fine on their own, so they should never
+// reach that step.
 function extractJson(text) {
-  // The prompt says no fences, but models emit them anyway often enough that
-  // stripping is cheaper than a retry.
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-  const candidate = (fenced ? fenced[1] : text).trim();
+  if (typeof text !== "string") return null;
 
-  // Outermost braces, in case the object arrives wrapped in a sentence.
+  const attempts = new Set();
+
+  // 1. As sent. What the prompt asks for, and what a well-behaved response is.
+  const trimmed = text.trim();
+  if (trimmed) attempts.add(trimmed);
+
+  // 2. Inside a code fence. The prompt says no fences, but models emit them
+  //    anyway often enough that stripping is cheaper than a retry.
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const fencedInner = fenced ? fenced[1].trim() : "";
+  if (fencedInner) attempts.add(fencedInner);
+
+  // 3. Outermost braces, in case the object arrives wrapped in a sentence.
+  const candidate = fencedInner || trimmed;
   const start = candidate.indexOf("{");
   const end = candidate.lastIndexOf("}");
-  if (start === -1 || end === -1 || end < start) return null;
+  if (start !== -1 && end > start) attempts.add(candidate.slice(start, end + 1));
 
-  try {
-    return JSON.parse(candidate.slice(start, end + 1));
-  } catch {
-    return null;
+  for (const attempt of attempts) {
+    try {
+      const parsed = JSON.parse(attempt);
+      // A bare string or number is valid JSON and useless here. Returning one
+      // would stop the ladder early and lose the object a later reading might
+      // still find.
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {
+      // Try the next reading.
+    }
   }
+
+  return null;
 }
 
 function validateDecision(parsed) {
@@ -226,6 +253,35 @@ function describeError(err) {
   if (err instanceof Anthropic.APIConnectionError) return "could not reach the API";
   if (err instanceof Anthropic.APIError) return `API error ${err.status}`;
   return "unexpected error";
+}
+
+// Some malformed output is beyond any amount of parsing — a stray quote after
+// a closing bracket is not a formatting quirk, it is invalid JSON, and the
+// judgment inside it is lost. Asking again is the only way to get it back.
+//
+// One retry, and only for a parse failure. A response that parses but doesn't
+// validate (a score of 11, a question with no text) is a decision the judge
+// actually made and we actually rejected; re-asking would be arguing with it.
+const RETRY_INSTRUCTION =
+  "Your last response was not valid JSON. Resend the exact same decision as " +
+  "strict valid JSON only — no prose, no code fences, nothing before or after " +
+  "the object.";
+
+async function callJudge(system, messages) {
+  const response = await anthropic.messages.create({
+    model: MODEL,
+    max_tokens: 16000,
+    thinking: { type: "adaptive" },
+    output_config: { effort: "medium" },
+    system,
+    messages,
+  });
+
+  // content is a union — thinking blocks ride alongside the text on 4.6.
+  return response.content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("");
 }
 
 function normalizeMessages(raw) {
@@ -288,26 +344,41 @@ app.post("/negotiate", async (req, res) => {
   let decision;
 
   try {
-    const response = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: 16000,
-      thinking: { type: "adaptive" },
-      output_config: { effort: "medium" },
-      system: buildSystemPrompt(body),
-      messages,
-    });
+    const system = buildSystemPrompt(body);
 
-    // content is a union — thinking blocks ride alongside the text on 4.6.
-    const text = response.content
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
-      .join("");
+    let text = await callJudge(system, messages);
+    let parsed = extractJson(text);
 
-    decision = validateDecision(extractJson(text));
+    if (!parsed) {
+      console.error("[pinechar] unparseable model output, retrying once:", text.slice(0, 500));
+
+      // The bad response goes back as the assistant turn it was, so "your last
+      // response" refers to something actually in the conversation. Skipped
+      // when there was no text at all — an empty assistant turn is not a
+      // message the API will accept.
+      const retryMessages = [...messages];
+      if (text.trim()) retryMessages.push({ role: "assistant", content: text });
+      retryMessages.push({ role: "user", content: RETRY_INSTRUCTION });
+
+      text = await callJudge(system, retryMessages);
+      parsed = extractJson(text);
+
+      if (parsed) {
+        console.log("[pinechar] JSON retry succeeded");
+      } else {
+        console.error("[pinechar] JSON retry failed:", text.slice(0, 500));
+        return res.json(fallbackDecision("model returned malformed JSON twice"));
+      }
+    }
+
+    decision = validateDecision(parsed);
 
     if (!decision) {
-      console.error("[pinechar] unparseable model output:", text.slice(0, 500));
-      return res.json(fallbackDecision("model returned malformed JSON"));
+      // Parsed cleanly, so this is a decision we understood and refused — a
+      // different failure from malformed output, and worth telling apart in
+      // the log.
+      console.error("[pinechar] model output failed validation:", text.slice(0, 500));
+      return res.json(fallbackDecision("model returned an invalid decision"));
     }
   } catch (err) {
     console.error("[pinechar] Anthropic call failed:", err);
