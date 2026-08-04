@@ -1,11 +1,10 @@
-// Site registry. The key is what gate.html receives as ?site= and what unlock()
-// takes as its `domain` argument; ruleId must be stable across restarts because
-// dynamic rules are addressed by ID.
-const SITES = {
-  instagram: { ruleId: 1, domain: "instagram.com" },
-};
+// The site registry and everything about the grant record live in
+// grant-schema.js, which the gate page and the overlay load too. This worker is
+// the only writer; it does not get its own idea of the shape.
+importScripts("./grant-schema.js");
 
-const GRANTS_KEY = "grants";
+const { SITES, GRANTS_KEY, loadGrants, saveGrants, isActive } = self.PineCharGrants;
+
 const ALARM_PREFIX = "relock:";
 const LEDGER_KEY = "ledger"; // written by gate.js; only read here for the count
 
@@ -62,39 +61,100 @@ async function evictTabs(key) {
 }
 
 async function getGrants() {
-  const stored = await chrome.storage.local.get(GRANTS_KEY);
-  return stored[GRANTS_KEY] ?? {};
+  const { grants } = await loadGrants(chrome.storage.local);
+  return grants;
 }
 
 async function setGrant(key, expiresAt) {
   const grants = await getGrants();
   grants[key] = expiresAt;
-  await chrome.storage.local.set({ [GRANTS_KEY]: grants });
+  await saveGrants(chrome.storage.local, grants);
 }
 
 async function clearGrant(key) {
   const grants = await getGrants();
   delete grants[key];
-  await chrome.storage.local.set({ [GRANTS_KEY]: grants });
+  await saveGrants(chrome.storage.local, grants);
 }
 
-// Open the gate for `minutes`. The expiry is written to storage before the alarm
-// is set, so a worker death between the two still leaves a record reconcile()
-// can act on.
-async function unlock(domain, minutes) {
+// ---------------------------------------------------------------------------
+// The worker lock
+// ---------------------------------------------------------------------------
+
+// Everything this worker does to the world — unlock, relock, reconcile — is a
+// read-modify-write across three stores that have to agree: the grant in
+// storage, the DNR rule, and the alarm. None of that is atomic, and the worker
+// happily runs two of them at once.
+//
+// It does, in the one case that matters most. A dead worker is woken *by* the
+// unlock message, so the startup reconcile() and the unlock handler start
+// within a turn of each other. reconcile() reads grants before unlock() writes
+// one, concludes the site should be shut, and calls relock() — whose
+// clearGrant() then deletes the grant unlock() has just written. The unlock
+// still reports ok, the rule still comes down, and the site opens with no grant
+// on record and no alarm pending: no pill, no session on the gate page, and
+// nothing to put the wall back until the next wake. That is not a rare
+// interleaving — a negotiation with a clarifying question in it takes minutes,
+// which is several times the ~30s the worker will idle before dying, so by
+// redemption time the worker is reliably dead and the race is the normal path.
+//
+// So: one operation at a time, in the order they arrived. Each waits for the
+// last to finish, which means each reads state the previous one has finished
+// writing. The queue is worker-local, which is all it needs to be — the worker
+// is the only writer of rules, alarms, and grants.
+let workerLock = Promise.resolve();
+
+function withWorkerLock(label, fn) {
+  const run = workerLock.then(fn, fn);
+  // The chain must survive a failed operation, or one rejection would strand
+  // every operation after it. Callers still see their own rejection.
+  workerLock = run.then(
+    () => {},
+    (err) => {
+      console.error(`[pinechar] ${label} failed inside the worker lock`, err);
+    },
+  );
+  return run;
+}
+
+// Open the gate for `minutes`.
+//
+// Order matters, and it is storage first. Every step after the grant write is
+// re-derivable from it by reconcile(), so the only question at each await is
+// what a worker death right there would leave behind:
+//
+//   crash after setGrant     — grant on record, rule still up. The site stays
+//                              blocked and reconcile() opens it on the next
+//                              wake. Fails closed.
+//   crash after removeRule   — site open, grant on record, alarm missing.
+//                              reconcile() re-arms it, and relocks outright if
+//                              the expiry has already passed.
+//
+// The reverse order has no such story: removing the rule first and dying
+// before the write leaves the site open with nothing recorded and no alarm
+// pending, so nothing would ever put the wall back.
+//
+// Ordering only settles what a crash leaves behind, though. What a *concurrent*
+// operation leaves behind is settled by withWorkerLock — without it, the
+// reconcile() that runs on this very wake-up can delete the grant written two
+// lines up.
+async function unlockNow(domain, minutes) {
   const site = SITES[domain];
   if (!site) throw new Error(`unknown site: ${domain}`);
 
   const expiresAt = Date.now() + minutes * 60_000;
-  await removeRule(domain);
   await setGrant(domain, expiresAt);
+  await removeRule(domain);
   await chrome.alarms.create(ALARM_PREFIX + domain, { when: expiresAt });
   return { expiresAt, domain: site.domain };
 }
 
 // Every path back to the blocked state goes through here — the expiry alarm and
 // reconcile() both call it — so eviction lands in both cases from one place.
-async function relock(key) {
+//
+// Takes the lock via relock(); reconcile() calls this inner form because it is
+// already holding it.
+async function relockNow(key) {
   // Rule first: if eviction ran first, a tab could navigate back in through the
   // window before the rule exists.
   await addRule(key);
@@ -112,13 +172,19 @@ async function relock(key) {
 
 // Runs on every worker startup. Storage is the source of truth; the rule table
 // and the alarm are both derived from it and re-derived here.
-async function reconcile() {
+//
+// This is the operation most likely to collide with another, because the thing
+// that woke the worker is usually a message that wants to change exactly what
+// reconcile is rebuilding. Holding the lock means it either runs before that
+// message's handler and sees a stale-but-consistent world, or after it and sees
+// the change — never halfway through it.
+async function reconcileNow() {
   const grants = await getGrants();
   const now = Date.now();
 
   for (const key of Object.keys(SITES)) {
     const expiresAt = grants[key];
-    if (expiresAt && expiresAt > now) {
+    if (isActive(expiresAt, now)) {
       // Grant is still live: keep the site reachable, and re-arm the alarm in
       // case it was dropped by an extension reload or update.
       await removeRule(key);
@@ -128,10 +194,18 @@ async function reconcile() {
       // fired because the browser was closed through the expiry. relock()
       // evicts, which catches session-restored tabs that came back up on the
       // site after their grant had already lapsed.
-      await relock(key);
+      await relockNow(key);
     }
   }
 }
+
+// The public forms. Everything that reaches the worker from outside — a
+// message, an alarm, a startup — enters through one of these and therefore
+// through the queue.
+const unlock = (domain, minutes) =>
+  withWorkerLock("unlock", () => unlockNow(domain, minutes));
+const relock = (key) => withWorkerLock("relock", () => relockNow(key));
+const reconcile = () => withWorkerLock("reconcile", () => reconcileNow());
 
 // ---------------------------------------------------------------------------
 // Dev reset

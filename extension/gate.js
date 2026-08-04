@@ -6,7 +6,9 @@ const NEGOTIATE_URL = "http://localhost:3111/negotiate";
 const REQUEST_TIMEOUT_MS = 60_000;
 
 const LEDGER_KEY = "ledger";
-const GRANTS_KEY = "grants"; // written by background.js
+// Grants are written by background.js and read here through the shared schema —
+// this page does not restate the key or the shape.
+const { activeGrant: readActiveGrant } = self.PineCharGrants;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 // Storage cap. Anything older than a week is already excluded from the prompt,
 // so trimming past this only drops events nothing reads.
@@ -241,9 +243,17 @@ function armRedemption(decision) {
       return;
     }
 
+    // Only now does a way to the site exist. The listener is attached here
+    // rather than up front so the capability to navigate cannot predate the
+    // worker's reply — and that reply is only sent once the DNR rule is
+    // actually gone. `disabled` alone would leave the guard in the DOM, one
+    // stray .click() away from sending the tab at a still-blocked site.
     grantError.hidden = true;
     siteDomain = res.domain ?? siteDomain;
     goButton.textContent = `Go to ${siteDomain}`;
+    goButton.addEventListener("click", () => {
+      location.href = `https://${siteDomain}`;
+    });
     goButton.disabled = false;
     goButton.focus();
   });
@@ -269,11 +279,9 @@ async function handleGrant(decision) {
 
   // Deliberately not automatic: navigating away the instant the code is
   // accepted would blow the grant off the screen before it could be read.
+  // Inert until redemption — armRedemption() attaches the click handler.
   goButton.textContent = `Go to ${siteDomain ?? siteLabel}`;
   goButton.disabled = true;
-  goButton.addEventListener("click", () => {
-    if (siteDomain) location.href = `https://${siteDomain}`;
-  });
 
   armRedemption(decision);
   codeInput.focus();
@@ -445,9 +453,7 @@ function showSession(expiresAt) {
 }
 
 async function activeGrant() {
-  const { [GRANTS_KEY]: grants = {} } = await chrome.storage.local.get(GRANTS_KEY);
-  const expiresAt = grants?.[site];
-  return typeof expiresAt === "number" && expiresAt > Date.now() ? expiresAt : null;
+  return readActiveGrant(chrome.storage.local, site);
 }
 
 // ---------------------------------------------------------------------------

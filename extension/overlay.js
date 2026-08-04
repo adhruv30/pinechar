@@ -5,13 +5,12 @@
 // arithmetic against expiresAt — no polling, no messaging, no wakeups. A
 // sleeping service worker and a closed extension page both leave this ticking.
 
-// Mirrors SITES in background.js and the matches list in manifest.json. The
-// manifest can't read a JS object and a content script can't import the
-// worker's, so the domain list necessarily lives in three places; adding a site
-// means touching all three.
-const SITE_DOMAINS = { instagram: "instagram.com" };
+// The site list and the grant shape come from grant-schema.js, which the
+// manifest loads immediately before this file — same isolated world, so it is
+// simply on the global by the time this runs. This script does not get its own
+// idea of either; that divergence is what kept the pill from ever appearing.
+const { SITES, loadGrants, isActive, siteForHost } = self.PineCharGrants;
 
-const GRANTS_KEY = "grants";
 const RED_BELOW_MS = 60_000;
 const MARKER = "data-pinechar-overlay";
 
@@ -23,15 +22,6 @@ const CORNERS = [
   { bottom: "12px", left: "12px" },
   { top: "12px", left: "12px" },
 ];
-
-function siteForHost(hostname) {
-  return (
-    Object.keys(SITE_DOMAINS).find((key) => {
-      const domain = SITE_DOMAINS[key];
-      return hostname === domain || hostname.endsWith(`.${domain}`);
-    }) ?? null
-  );
-}
 
 function formatRemaining(ms) {
   // Ceil, so the last second reads 0:01 rather than flipping to 0:00 while a
@@ -55,6 +45,25 @@ function placeAt(host, index) {
     host.style.removeProperty(side);
   }
   applyImportant(host, CORNERS[index]);
+}
+
+// Instagram is a single-page app. A route change re-renders whole subtrees, and
+// a framework is free to sweep up a node it did not put there — this one. The
+// content script does not run again on a client-side navigation, so once the
+// host is detached it stays detached for the rest of the session, and the pill
+// silently disappears partway through a grant.
+//
+// Watching documentElement's child list is enough: that is the only place the
+// host is ever attached, and the observer fires whether the host was removed by
+// itself or as part of a larger sweep. Re-appending inside the callback queues
+// one more record, which then finds the host connected and stops — no loop.
+function keepAttached(host) {
+  const observer = new MutationObserver(() => {
+    if (host.isConnected) return;
+    document.documentElement.append(host);
+  });
+  observer.observe(document.documentElement, { childList: true });
+  return observer;
 }
 
 function render(expiresAt) {
@@ -140,6 +149,7 @@ function render(expiresAt) {
   // documentElement, not body: Instagram re-renders its body subtree freely,
   // and client-side routing never reloads this script.
   document.documentElement.append(host);
+  keepAttached(host);
 
   const ticker = setInterval(() => {
     const remaining = expiresAt - Date.now();
@@ -168,14 +178,26 @@ async function start() {
   if (document.querySelector(`[${MARKER}]`)) return;
 
   const site = siteForHost(location.hostname);
-  if (!site) return;
+  if (!site) {
+    // The manifest matched this page but the schema doesn't know the host, so
+    // content_scripts.matches and SITES have drifted apart. Silence here is how
+    // a mismatch hides, so say it out loud.
+    console.error(
+      `[pinechar] overlay injected on ${location.hostname}, which is not a known ` +
+        `site (known: ${Object.keys(SITES).join(", ")}). ` +
+        `content_scripts.matches and SITES in grant-schema.js disagree.`,
+    );
+    return;
+  }
 
-  const { [GRANTS_KEY]: grants = {} } = await chrome.storage.local.get(GRANTS_KEY);
-  const expiresAt = grants?.[site];
+  // loadGrants reports divergence itself, loudly. Anything it hands back here
+  // matches the schema.
+  const { grants } = await loadGrants(chrome.storage.local);
+  const expiresAt = grants[site];
 
   // No grant, or one that lapsed while the page was loading. Either way the
   // worker is about to take this tab; nothing to draw.
-  if (typeof expiresAt !== "number" || expiresAt <= Date.now()) return;
+  if (!isActive(expiresAt)) return;
 
   render(expiresAt);
 }
