@@ -38,6 +38,7 @@ async function grantViaDirectPath(logs) {
     type: "unlock",
     site: "instagram",
     minutes: 20,
+    granted: 20,
   });
   await settle();
   return { env, res };
@@ -56,6 +57,7 @@ async function grantViaQuestionPath(logs) {
     type: "unlock",
     site: "instagram",
     minutes: 20,
+    granted: 20,
   });
   await settle();
   return { env, res };

@@ -17,6 +17,17 @@ const LEDGER_MAX_EVENTS = 500;
 // How often the active-session countdown redraws.
 const SESSION_TICK_MS = 30_000;
 
+// The redemption ritual branches here. At 7+ the case was made and the only
+// question left is how much of the ceiling to spend, so the input is a bare
+// number. Below that the grant is real but marginal, and the same number has
+// to be said as a sentence naming what it costs. 1-3 never reaches either:
+// those score to zero minutes and there is no grant to redeem.
+const FAST_PATH_SCORE = 7;
+
+// The floor on a redemption. Granted minutes are the ceiling; this is the other
+// end. Mirrored in background.js, which is where it is actually enforced.
+const MIN_TAKEN_MINUTES = 1;
+
 // No settings UI yet — these are what the server sees until there is one.
 const DEFAULT_SETTINGS = {
   strictness: "moderate",
@@ -40,7 +51,12 @@ const grantPanel = document.getElementById("grant");
 const grantMinutes = document.getElementById("grantMinutes");
 const grantCode = document.getElementById("grantCode");
 const grantError = document.getElementById("grantError");
-const codeInput = document.getElementById("codeInput");
+const redeemFast = document.getElementById("redeemFast");
+const redeemSentence = document.getElementById("redeemSentence");
+const takeFast = document.getElementById("takeFast");
+const takeSentence = document.getElementById("takeSentence");
+const sentenceSite = document.getElementById("sentenceSite");
+const insteadOfText = document.getElementById("insteadOf");
 const goButton = document.getElementById("go");
 const sessionPanel = document.getElementById("session");
 const sessionTime = document.getElementById("sessionTime");
@@ -109,6 +125,35 @@ async function readLedger() {
   return Array.isArray(ledger) ? ledger : [];
 }
 
+// The one event that is written twice: a grant is logged when the judge makes
+// it, and amended when the user says how much of it they are spending. Those
+// are minutes apart and the second may never come, so the alternative — hold
+// the write until redemption — would lose every walked-away grant, which is
+// exactly the record worth keeping.
+//
+// Found by code, which is why the server still generates one: it is the
+// grant's ID. Joins the same serialized chain as appendEvent, so the read
+// here cannot straddle an append.
+function recordTaken(code, taken) {
+  ledgerWrites = ledgerWrites.then(async () => {
+    const { [LEDGER_KEY]: ledger = [] } = await chrome.storage.local.get(LEDGER_KEY);
+    if (!Array.isArray(ledger)) return;
+
+    // Last match, not first: codes are random enough not to repeat, but the
+    // newest entry is the right answer if one ever did.
+    const entry = [...ledger].reverse().find((e) => e?.type === "grant" && e.code === code);
+    if (!entry) {
+      console.error("[pinechar] no grant to amend for code", code);
+      return;
+    }
+
+    entry.taken = taken;
+    entry.takenAt = Date.now();
+    await chrome.storage.local.set({ [LEDGER_KEY]: ledger.slice(-LEDGER_MAX_EVENTS) });
+  });
+  return ledgerWrites;
+}
+
 // The request that produced a decision, flushed alongside it. The opening ask
 // is the request; anything after it is answering the judge's question.
 function requestEvent() {
@@ -139,7 +184,11 @@ function summarizeToday(ledger) {
     // counts once no matter how many turns it takes.
     requests: today.filter((e) => e.type === "request").length + 1,
     grants: grants.length,
-    minutesGranted: grants.reduce((sum, e) => sum + (e.minutes ?? 0), 0),
+    // Two numbers since the ritual swap: the ceiling earned, and the minutes
+    // actually spent under it. `e.minutes` is the pre-swap field name, still
+    // in ledgers written before this change.
+    minutesGranted: grants.reduce((sum, e) => sum + (e.granted ?? e.minutes ?? 0), 0),
+    minutesTaken: grants.reduce((sum, e) => sum + (e.taken ?? e.minutes ?? 0), 0),
     denials: denials.length,
     flags: { post_expiry: postExpiry, post_denial: denials.length > 0 },
   };
@@ -186,22 +235,35 @@ async function negotiate() {
   }
 
   // The server fails closed on its own errors, but a malformed body here would
-  // otherwise turn into `minutes: undefined` and a silently broken unlock.
-  const minutes = Number(data.minutes);
-  if (!Number.isFinite(minutes) || minutes < 0) throw new Error("malformed minutes");
+  // otherwise turn into `granted: undefined` and a silently broken unlock.
+  const granted = Number(data.minutes);
+  if (!Number.isFinite(granted) || granted < 0) throw new Error("malformed minutes");
 
   const code = typeof data.code === "string" ? data.code : null;
-  // The code is the only way to redeem a grant, so a grant without one is not
-  // usable — treat it as a broken response rather than opening the gate.
-  if (minutes > 0 && !code) throw new Error("grant arrived without a code");
+  const score = Number.isInteger(data.score) ? data.score : null;
+
+  // Both of these are load-bearing on a grant and neither has a safe default:
+  // the code is the ledger entry's ID, and the score decides which ritual the
+  // user is asked for. Missing either means a response we don't understand, so
+  // the gate stays shut rather than guessing. Denials need neither.
+  if (granted > 0 && !code) throw new Error("grant arrived without a code");
+  if (granted > 0 && score === null) throw new Error("grant arrived without a score");
 
   return {
     kind: "judgment",
-    minutes: Math.floor(minutes),
+    // A ceiling. What the user chooses under it is `taken`, decided at
+    // redemption, and that is what actually opens the gate.
+    granted: Math.floor(granted),
     code,
     message,
     reasoning: typeof data.reasoning === "string" ? data.reasoning : "",
-    score: Number.isInteger(data.score) ? data.score : null,
+    score,
+    // Only the mid-score sentence reads this, and only as decoration, so an
+    // absent one falls back here rather than failing the grant.
+    insteadOf:
+      typeof data.insteadOf === "string" && data.insteadOf.trim()
+        ? data.insteadOf.trim()
+        : "your goals",
     claims: Array.isArray(data.claims) ? data.claims.filter((c) => typeof c === "string") : [],
   };
 }
@@ -210,45 +272,83 @@ async function negotiate() {
 // Outcomes
 // ---------------------------------------------------------------------------
 
-// Typing the code back is the commitment ritual — the gate does not open as a
-// side effect of the judge saying yes, only of the user acting on it.
-function armRedemption(decision) {
-  const expected = decision.code.trim().toUpperCase();
-  let redeeming = false;
+// Strict on purpose. `type="number"` already hands back "" for input the
+// browser itself couldn't parse, but it will happily pass through "20.5",
+// "-5" and "1e3" — all of which Number() accepts and none of which is a
+// number of minutes. Digits only, then the range.
+function parseTaken(raw, ceiling) {
+  const trimmed = String(raw ?? "").trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const taken = Number(trimmed);
+  return taken >= MIN_TAKEN_MINUTES && taken <= ceiling ? taken : null;
+}
 
-  codeInput.addEventListener("input", async () => {
-    if (redeeming) return;
-    if (codeInput.value.trim().toUpperCase() !== expected) {
-      goButton.disabled = true;
-      return;
-    }
+// The commitment ritual. The gate does not open as a side effect of the judge
+// saying yes: the user has to name a number under the ceiling and act on it.
+//
+// Two stages on one button, and the split is not cosmetic. The first click
+// redeems; only once the worker has answered does a listener that can navigate
+// get attached. That ordering is the whole guard — the capability to reach the
+// site must not exist before the DNR rule is actually gone, and `disabled`
+// alone would leave a handler in the DOM one stray .click() from firing.
+function armRedemption(decision) {
+  const ceiling = decision.granted;
+  const field = decision.score >= FAST_PATH_SCORE ? takeFast : takeSentence;
+
+  let taken = null;
+  let redeeming = false;
+  let redeemed = false;
+
+  // Live validation only — no unlock happens here. An input listener that
+  // redeemed on its own would fire on the "2" of "20" and take two minutes of
+  // a twenty-minute grant.
+  function refresh() {
+    taken = parseTaken(field.value, ceiling);
+    goButton.disabled = taken === null;
+    goButton.textContent = taken === null ? `Take up to ${ceiling} min` : `Take ${taken} min`;
+  }
+
+  field.addEventListener("input", refresh);
+
+  goButton.addEventListener("click", async () => {
+    // This listener outlives redemption — the navigation handler is added
+    // alongside it rather than replacing it — so it has to go quiet once its
+    // work is done.
+    if (redeemed || redeeming || taken === null) return;
 
     redeeming = true;
-    codeInput.disabled = true;
+    field.disabled = true;
+    goButton.disabled = true;
 
     const res = await chrome.runtime.sendMessage({
       type: "unlock",
       site,
-      minutes: decision.minutes,
+      // What the user chose, and the ceiling it has to fit under. The worker
+      // clamps against both rather than trusting either.
+      minutes: taken,
+      granted: ceiling,
     });
 
     if (!res?.ok) {
-      // The code was right; the plumbing wasn't. Let them try again rather
+      // The choice was valid; the plumbing wasn't. Let them try again rather
       // than stranding a legitimate grant.
       grantError.textContent = `Couldn't open the gate: ${res?.error ?? "no response from the extension"}`;
       grantError.hidden = false;
-      codeInput.disabled = false;
-      codeInput.value = "";
+      field.disabled = false;
       redeeming = false;
+      refresh();
       return;
     }
 
-    // Only now does a way to the site exist. The listener is attached here
-    // rather than up front so the capability to navigate cannot predate the
-    // worker's reply — and that reply is only sent once the DNR rule is
-    // actually gone. `disabled` alone would leave the guard in the DOM, one
-    // stray .click() away from sending the tab at a still-blocked site.
+    redeemed = true;
     grantError.hidden = true;
+
+    // The worker clamps, so what it opened may be less than what was asked
+    // for. The ledger records its answer, not the request.
+    const opened = Number.isFinite(res.minutes) ? res.minutes : taken;
+    await recordTaken(decision.code, opened);
+    grantMinutes.textContent = `${opened} min on ${siteLabel} — running`;
+
     siteDomain = res.domain ?? siteDomain;
     goButton.textContent = `Go to ${siteDomain}`;
     goButton.addEventListener("click", () => {
@@ -257,6 +357,23 @@ function armRedemption(decision) {
     goButton.disabled = false;
     goButton.focus();
   });
+
+  if (field === takeSentence) {
+    sentenceSite.textContent = siteLabel;
+    insteadOfText.textContent = decision.insteadOf;
+    redeemSentence.hidden = false;
+  } else {
+    redeemFast.hidden = false;
+  }
+
+  // The browser's own bounds, so the spinner and the arrow keys agree with
+  // parseTaken instead of quietly offering numbers it will reject.
+  field.min = String(MIN_TAKEN_MINUTES);
+  field.max = String(ceiling);
+  field.step = "1";
+
+  refresh();
+  field.focus();
 }
 
 async function handleGrant(decision) {
@@ -266,25 +383,31 @@ async function handleGrant(decision) {
     at: Date.now(),
     site,
     score: decision.score,
-    minutes: decision.minutes,
+    // Two numbers, deliberately. `granted` is what the score bought;
+    // `taken` is what was actually spent, and it stays 0 until a redemption
+    // patches it — a grant walked away from is a real and interesting event,
+    // not a missing one.
+    granted: decision.granted,
+    taken: 0,
+    // The code is the grant's ID now rather than something typed back. It is
+    // what recordTaken() finds this entry by.
     code: decision.code,
+    insteadOf: decision.insteadOf,
     claims: decision.claims,
     reasoning: decision.reasoning,
   });
 
-  grantMinutes.textContent = `${decision.minutes} min on ${siteLabel}`;
+  grantMinutes.textContent = `Up to ${decision.granted} min on ${siteLabel}`;
   grantCode.textContent = decision.code;
   grantPanel.hidden = false;
   composer.hidden = true;
 
-  // Deliberately not automatic: navigating away the instant the code is
-  // accepted would blow the grant off the screen before it could be read.
-  // Inert until redemption — armRedemption() attaches the click handler.
-  goButton.textContent = `Go to ${siteDomain ?? siteLabel}`;
+  // Deliberately not automatic: navigating away the instant a number is typed
+  // would blow the grant off the screen before it could be read. armRedemption
+  // owns the button from here.
   goButton.disabled = true;
 
   armRedemption(decision);
-  codeInput.focus();
 }
 
 async function handleDenial(decision) {
@@ -358,7 +481,7 @@ async function submit() {
     if (decision.kind === "question") {
       // Nothing decided, nothing logged. The user answers and we go again.
       questionsAsked += 1;
-    } else if (decision.minutes > 0) {
+    } else if (decision.granted > 0) {
       await handleGrant(decision);
       return; // composer is hidden; the negotiation is over
     } else {

@@ -121,6 +121,10 @@ Later milestones: weekly report (M4), site groups/hardening (M5),
 deploy + Web Store (M6).
 
 ## Conventions
+- Do exactly what the prompt asks and nothing beyond it. No harness
+  additions, no test branches, no refactors, no extras unless explicitly
+  asked. Anything else worth doing goes in one sentence at the end as a
+  proposal, for the user to decide.
 - Commit at working states and before risky changes; milestone-style messages.
 - Explain non-obvious changes in output (user is learning the stack).
 - Ask before behavior changes not in the request.

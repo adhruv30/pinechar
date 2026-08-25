@@ -107,20 +107,34 @@
         font-size: 22px;
         font-weight: 600;
       }
+      /* The code is no longer typed back — it is the grant's ID, kept visible
+         small so a grant can be matched to its ledger entry by eye. */
       #grantCode {
-        font: 600 18px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
-        letter-spacing: 0.08em;
+        font: 500 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        letter-spacing: 0.06em;
+        color: #6b8570;
         user-select: all;
       }
       #grantError {
         color: #7a1c1c;
         margin: 8px 0 0;
       }
+      /* Below the button, not above it: the ID is for the record, not the
+         decision. */
+      .grant-id {
+        margin: 10px 0 0;
+      }
+      .grant-id .grant-label {
+        font-size: 10px;
+      }
       #go {
         margin-top: 8px;
       }
 
-      /* The ritual: the code has to be typed back before the gate opens. */
+      /* The ritual. Granted minutes are a ceiling; what opens the gate is the
+         number the user picks under it. Two shapes of the same choice, chosen
+         by score: a bare field when the case was strong, and the same field
+         set inside a sentence they have to mean when it was borderline. */
       .redeem {
         margin: 10px 0 0;
       }
@@ -129,16 +143,28 @@
         font-size: 12px;
         margin: 0 0 4px;
       }
-      #codeInput {
-        font: 600 16px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        padding: 7px 10px;
+      /* Reads as a line of prose with a blank in it, so it wraps like one. */
+      .redeem-sentence {
+        font-size: 15px;
+        line-height: 2;
+        color: #24351f;
+        margin: 0;
+      }
+      .redeem-sentence #takeSentence {
+        margin: 0 2px;
+      }
+      #insteadOf {
+        font-weight: 600;
+      }
+      .take-input {
+        font: 600 16px/1 system-ui, sans-serif;
+        padding: 7px 8px;
         border: 1px solid #b6cdb8;
         border-radius: 8px;
-        width: 11ch;
+        width: 5ch;
+        text-align: center;
       }
-      #codeInput:disabled {
+      .take-input:disabled {
         background: #e7efe8;
         color: #46614a;
       }
@@ -202,23 +228,45 @@
         <span class="grant-label">Granted</span>
         <span id="grantMinutes"></span>
       </div>
-      <div class="grant-line">
-        <span class="grant-label">Code</span>
-        <span id="grantCode"></span>
-      </div>
-      <div class="redeem">
-        <p class="redeem-hint">Type the code to open the gate.</p>
+
+      <!-- Score 7+: the case was made, so the only question left is how much
+           of the ceiling to spend. -->
+      <div class="redeem" id="redeemFast" hidden>
+        <p class="redeem-hint">How many minutes are you taking?</p>
         <input
-          id="codeInput"
-          type="text"
+          id="takeFast"
+          class="take-input"
+          type="number"
           autocomplete="off"
-          autocapitalize="characters"
           spellcheck="false"
-          aria-label="Type the unlock code"
+          aria-label="Minutes to take"
         />
       </div>
+
+      <!-- Score 4-6: borderline. The same number, but it has to be said as a
+           sentence with the cost in it. -->
+      <div class="redeem" id="redeemSentence" hidden>
+        <p class="redeem-sentence">
+          I'm choosing to spend
+          <input
+            id="takeSentence"
+            class="take-input"
+            type="number"
+            autocomplete="off"
+            spellcheck="false"
+            aria-label="Minutes to take"
+          />
+          minutes on <span id="sentenceSite"></span> instead of
+          <span id="insteadOf"></span>.
+        </p>
+      </div>
+
       <button id="go" disabled></button>
       <p id="grantError" hidden></p>
+      <div class="grant-line grant-id">
+        <span class="grant-label">Grant</span>
+        <span id="grantCode"></span>
+      </div>
     </section>
 
     <section id="session" hidden>

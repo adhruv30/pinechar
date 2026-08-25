@@ -63,10 +63,13 @@ function minutesFor(score, strictness) {
 }
 
 // ---------------------------------------------------------------------------
-// Unlock code
+// Grant code
 // ---------------------------------------------------------------------------
 
-// No I/O/0/1 — the user types this back by hand, so ambiguous glyphs are out.
+// The code is no longer typed back — it is the grant's ID, the handle the
+// ledger entry is written under and later patched by when the user redeems.
+// The unambiguous alphabet stays anyway: it is read by a human off the grant
+// panel and quoted back in bug reports, so I/O/0/1 are still a liability.
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 function generateCode() {
@@ -81,6 +84,26 @@ function generateCode() {
 
 const MAX_PERSONA_CHARS = 300;
 const DEFAULT_PERSONA = "A fair, plain-spoken gatekeeper.";
+
+// The tail of the mid-score ritual sentence: "…instead of {{insteadOf}}".
+// Vague on purpose — it is what the user reads when the judge named nothing
+// specific, and a wrong specific would be worse than a true general.
+const DEFAULT_INSTEAD_OF = "your goals";
+const MAX_INSTEAD_OF_CHARS = 80;
+
+// Rendered as textContent inside a fixed sentence on the gate, so this is a
+// layout guard rather than an escaping one: a paragraph where a phrase belongs
+// would push the number input off the panel.
+function sanitizeInsteadOf(raw) {
+  if (typeof raw !== "string") return DEFAULT_INSTEAD_OF;
+  const cleaned = raw
+    .replace(/[\u0000-\u001F\u007F]/g, " ") // control chars, incl. newlines
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.]+$/, "") // it lands mid-sentence; a full stop would read as the end
+    .slice(0, MAX_INSTEAD_OF_CHARS);
+  return cleaned || DEFAULT_INSTEAD_OF;
+}
 
 // The persona lands inside a quoted slot in the template, so an unescaped quote
 // would let it break out of the voice layer and write free-form system text.
@@ -227,6 +250,10 @@ function validateDecision(parsed) {
     claims: Array.isArray(parsed.claims)
       ? parsed.claims.filter((c) => typeof c === "string")
       : [],
+    // Optional. It only decorates the mid-score ritual sentence, so a model
+    // that omits it should not cost the user a grant it already earned —
+    // the route substitutes DEFAULT_INSTEAD_OF.
+    insteadOf: typeof parsed.insteadOf === "string" ? parsed.insteadOf.trim() : "",
     message: typeof parsed.message === "string" ? parsed.message : "",
   };
 }
@@ -240,6 +267,7 @@ function fallbackDecision(reason) {
     score: 1,
     minutes: 0,
     code: null,
+    insteadOf: DEFAULT_INSTEAD_OF,
     claims: [],
     reasoning: `Fallback denial: ${reason}`,
     message:
@@ -402,9 +430,16 @@ app.post("/negotiate", async (req, res) => {
     // Derived here, not taken from the model: the score bands and the
     // strictness table decide the outcome, and the judge never sees minutes.
     decision: minutes > 0 ? "granted" : "denied",
+    // The client branches the redemption ritual on this — 7+ takes the fast
+    // path, 4-6 completes the sentence — so it is part of the contract now,
+    // not just something the ledger happens to record.
     score: decision.score,
+    // A ceiling, not an allocation. The user picks how much of it to spend.
     minutes,
     code: minutes > 0 ? generateCode() : null,
+    // Tail of the mid-score ritual sentence. Only that path reads it, but it
+    // rides along on every judgment so the shape doesn't depend on the band.
+    insteadOf: sanitizeInsteadOf(decision.insteadOf),
     reasoning: decision.reasoning,
     // The extension writes these into the ledger, which is what lets rule 5
     // catch a claim being spent twice — without them the week has no memory.

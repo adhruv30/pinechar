@@ -42,6 +42,7 @@ branch("unlock writes a schema-valid grant under the site key", async () => {
     type: "unlock",
     site: "instagram",
     minutes: 20,
+    granted: 20,
   });
   await settle();
 
@@ -59,7 +60,7 @@ branch("unlock writes a schema-valid grant under the site key", async () => {
 branch("unlock takes the wall down and arms the relock alarm", async () => {
   const { env } = wake();
   await settle();
-  await env.chrome.runtime.sendMessage({ type: "unlock", site: "instagram", minutes: 20 });
+  await env.chrome.runtime.sendMessage({ type: "unlock", site: "instagram", minutes: 20, granted: 20 });
   await settle();
 
   expect.is(env.hasRule(RULE_ID), false, "site should be reachable during a grant");
@@ -88,6 +89,7 @@ branch("clarifying-question path: grant survives the reconcile that woke with it
     type: "unlock",
     site: "instagram",
     minutes: 20,
+    granted: 20,
   });
   await settle();
 
@@ -113,6 +115,7 @@ branch("direct path: same race when the worker was already awake", async () => {
     type: "unlock",
     site: "instagram",
     minutes: 20,
+    granted: 20,
   });
   await settle();
 
@@ -124,8 +127,8 @@ branch("direct path: same race when the worker was already awake", async () => {
 branch("two unlocks in flight leave one coherent grant", async () => {
   const { env } = wake();
   const [a, b] = await Promise.all([
-    env.chrome.runtime.sendMessage({ type: "unlock", site: "instagram", minutes: 5 }),
-    env.chrome.runtime.sendMessage({ type: "unlock", site: "instagram", minutes: 20 }),
+    env.chrome.runtime.sendMessage({ type: "unlock", site: "instagram", minutes: 5, granted: 5 }),
+    env.chrome.runtime.sendMessage({ type: "unlock", site: "instagram", minutes: 20, granted: 20 }),
   ]);
   await settle();
 
@@ -182,6 +185,7 @@ branch("unknown site is refused rather than opening anything", async () => {
     type: "unlock",
     site: "tiktok",
     minutes: 20,
+    granted: 20,
   });
   await settle();
 
@@ -192,11 +196,12 @@ branch("unknown site is refused rather than opening anything", async () => {
 branch("a failed operation does not strand the queue", async () => {
   const { env } = wake();
   await settle();
-  await env.chrome.runtime.sendMessage({ type: "unlock", site: "tiktok", minutes: 20 });
+  await env.chrome.runtime.sendMessage({ type: "unlock", site: "tiktok", minutes: 20, granted: 20 });
   const res = await env.chrome.runtime.sendMessage({
     type: "unlock",
     site: "instagram",
     minutes: 20,
+    granted: 20,
   });
   await settle();
 

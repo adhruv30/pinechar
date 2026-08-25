@@ -8,6 +8,36 @@ const { SITES, GRANTS_KEY, loadGrants, saveGrants, isActive } = self.PineCharGra
 const ALARM_PREFIX = "relock:";
 const LEDGER_KEY = "ledger"; // written by gate.js; only read here for the count
 
+// The wall's own ceiling on a single session, in minutes. The server clamps to
+// the same number on the way out, but that clamp lives on the other side of an
+// HTTP call the page makes — it is a policy, not a wall. This one is the wall:
+// nothing that reaches unlock() can open the site for longer than this,
+// whatever the page believes it was granted.
+const MAX_MINUTES = 60;
+const MIN_MINUTES = 1;
+
+// taken <= granted <= MAX_MINUTES.
+//
+// `taken` is what the user chose on the gate; `granted` is the ceiling the
+// judge's score paid out. The page is the only thing that has ever seen the
+// grant, so the worker cannot verify `granted` — but it can refuse to be told
+// a ceiling it doesn't understand, and it can refuse to exceed one it does.
+// Returns null for anything it will not open the gate on; a request for more
+// than the ceiling is clamped down rather than refused, since asking for too
+// much is a slip, not an attack the wall needs to punish.
+function clampMinutes(taken, granted) {
+  const ceiling = Math.min(Math.floor(Number(granted)), MAX_MINUTES);
+  const want = Math.floor(Number(taken));
+
+  // Fail closed on either being absent or unreadable. A missing ceiling used to
+  // be harmless because the page sent the full grant and nothing else; now the
+  // two numbers are separate, and a dropped one must not default to "all of it".
+  if (!Number.isFinite(ceiling) || ceiling < MIN_MINUTES) return null;
+  if (!Number.isFinite(want) || want < MIN_MINUTES) return null;
+
+  return Math.min(want, ceiling);
+}
+
 function blockRule(key) {
   const site = SITES[key];
   return {
@@ -117,7 +147,7 @@ function withWorkerLock(label, fn) {
   return run;
 }
 
-// Open the gate for `minutes`.
+// Open the gate for the minutes the user chose, up to the minutes they earned.
 //
 // Order matters, and it is storage first. Every step after the grant write is
 // re-derivable from it by reconcile(), so the only question at each await is
@@ -138,15 +168,23 @@ function withWorkerLock(label, fn) {
 // operation leaves behind is settled by withWorkerLock — without it, the
 // reconcile() that runs on this very wake-up can delete the grant written two
 // lines up.
-async function unlockNow(domain, minutes) {
+async function unlockNow(domain, taken, granted) {
   const site = SITES[domain];
   if (!site) throw new Error(`unknown site: ${domain}`);
+
+  const minutes = clampMinutes(taken, granted);
+  if (minutes === null) {
+    throw new Error(`unusable unlock minutes: taken=${taken}, granted=${granted}`);
+  }
 
   const expiresAt = Date.now() + minutes * 60_000;
   await setGrant(domain, expiresAt);
   await removeRule(domain);
   await chrome.alarms.create(ALARM_PREFIX + domain, { when: expiresAt });
-  return { expiresAt, domain: site.domain };
+  // `minutes` goes back out because it is what actually happened — the page
+  // asked, the wall decided, and the ledger records the wall's answer rather
+  // than the page's request.
+  return { expiresAt, minutes, domain: site.domain };
 }
 
 // Every path back to the blocked state goes through here — the expiry alarm and
@@ -202,8 +240,8 @@ async function reconcileNow() {
 // The public forms. Everything that reaches the worker from outside — a
 // message, an alarm, a startup — enters through one of these and therefore
 // through the queue.
-const unlock = (domain, minutes) =>
-  withWorkerLock("unlock", () => unlockNow(domain, minutes));
+const unlock = (domain, taken, granted) =>
+  withWorkerLock("unlock", () => unlockNow(domain, taken, granted));
 const relock = (key) => withWorkerLock("relock", () => relockNow(key));
 const reconcile = () => withWorkerLock("reconcile", () => reconcileNow());
 
@@ -261,7 +299,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "unlock") {
-    unlock(msg.site, msg.minutes)
+    // msg.minutes is what the user chose to take; msg.granted is the ceiling
+    // the judge paid out. Both are required — see clampMinutes.
+    unlock(msg.site, msg.minutes, msg.granted)
       .then((result) => sendResponse({ ok: true, ...result }))
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true; // keep the channel open for the async sendResponse
