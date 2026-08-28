@@ -2,12 +2,6 @@
 
 PineChar is a Chrome extension that puts a negotiation between you and a distracting site. When you navigate to a blocked domain you land on a gate page and have to argue your case: an LLM judge reads your weekly goals, a ledger of everything you've claimed this week, and what you've already spent today, then scores the request 1–10. Code turns that score into a number of minutes — nothing, or a ceiling you then choose within. The site unlocks for exactly that long, then re-blocks itself and evicts the tab. It started as a personal commitment device, so the judge is deliberately hard to talk around: re-claiming progress you already banked, dressing leisure up as utility, or telling the model to go easy on you all score worse than just asking honestly.
 
-## Screenshot
-
-<!-- TODO: screenshot of the gate page mid-negotiation -->
-
-![PineChar gate page](docs/screenshot.png)
-
 ## How it works
 
 The architecture rule is **the AI judges, code enforces**. The model never touches enforcement. It emits one of two JSON shapes — a clarifying question, or a judgment carrying a score, reasoning, the claims it's recording, and a message — and that's the entirety of its authority. The server maps score → minutes through a fixed strictness table (moderate: score 6 → 20 min, score 4 → 5 min, 1–3 → nothing), clamps the result, and derives granted/denied itself. The judge never sees a minute count and cannot ask for one.
